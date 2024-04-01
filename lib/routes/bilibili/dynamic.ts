@@ -18,7 +18,7 @@ export const route: Route = {
             {
                 name: 'BILIBILI_COOKIE_*',
                 optional: true,
-                description: `BILIBILI_COOKIE_{uid}: 用于用户关注动态系列路由，对应 uid 的 b 站用户登录后的 Cookie 值，\`{uid}\` 替换为 uid，如 \`BILIBILI_COOKIE_2267573\`，获取方式：
+                description: `如果没有此配置，那么必须开启 puppeteer 支持；BILIBILI_COOKIE_{uid}: 用于用户关注动态系列路由，对应 uid 的 b 站用户登录后的 Cookie 值，\`{uid}\` 替换为 uid，如 \`BILIBILI_COOKIE_2267573\`，获取方式：
 1.  打开 [https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new?uid=0&type=8](https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new?uid=0&type=8)
 2.  打开控制台，切换到 Network 面板，刷新
 3.  点击 dynamic_new 请求，找到 Cookie
@@ -61,11 +61,15 @@ const getTitle = (data: Modules) => {
     if (!major) {
         return '';
     }
-    if (major.type === 'MAJOR_TYPE_NONE') {
-        return major.none?.tips;
+    if (major.none) {
+        return major.none.tips;
     }
-    if (major.type === 'MAJOR_TYPE_COURSES') {
+    if (major.courses) {
         return `${major.courses?.title} - ${major.courses?.sub_title}`;
+    }
+    if (major.live_rcmd?.content) {
+        // 正在直播的动态
+        return JSON.parse(major.live_rcmd.content)?.live_play_info?.title;
     }
     const type = major.type.replace('MAJOR_TYPE_', '').toLowerCase();
     return major[type]?.title;
@@ -85,9 +89,14 @@ const getDes = (data: Modules) => {
         desc += desc ? `<br>//转发自: ${major.common.desc}` : major.common.desc;
         return desc;
     }
-    // 直播动态
+    // 转发的直播间
     if (major?.live) {
         return `${major.live?.desc_first}<br>${major.live?.desc_second}`;
+    }
+    // 正在直播的动态
+    if (major.live_rcmd?.content) {
+        const live_play_info = JSON.parse(major.live_rcmd.content)?.live_play_info;
+        return `${live_play_info?.area_name}·${live_play_info?.watched_show?.text_large}`;
     }
     // 图文动态
     if (major?.opus) {
@@ -129,6 +138,10 @@ const getImgs = (data: Modules) => {
     // 相簿
     if (major.draw?.items?.length) {
         imgUrls.push(...major.draw.items.map((e) => e.src));
+    }
+    // 正在直播的动态
+    if (major.live_rcmd?.content) {
+        imgUrls.push(JSON.parse(major.live_rcmd.content)?.live_play_info?.cover);
     }
     const type = major.type.replace('MAJOR_TYPE_', '').toLowerCase();
     if (major[type]?.cover) {
@@ -195,6 +208,12 @@ const getUrl = (item?: Item2, useAvid = false) => {
             url = `https://live.bilibili.com/${major?.live?.id}`;
             text = `<br>直播间地址：<a href=${url}>${url}</a>`;
             break;
+        case 'MAJOR_TYPE_LIVE_RCMD': {
+            const live_play_info = JSON.parse(major.live_rcmd?.content || '{}')?.live_play_info;
+            url = `https://live.bilibili.com/${live_play_info?.room_id}`;
+            text = `<br>直播间地址：<a href=${url}>${url}</a>`;
+            break;
+        }
         default:
             return null;
     }
@@ -213,7 +232,7 @@ async function handler(ctx) {
     const useAvid = fallback(undefined, queryToBoolean(routeParams.useAvid), false);
     const directLink = fallback(undefined, queryToBoolean(routeParams.directLink), false);
 
-    const cookie = cacheIn.getCookie();
+    const cookie = await cacheIn.getCookie();
 
     const response = await got({
         method: 'get',
@@ -230,7 +249,8 @@ async function handler(ctx) {
     });
     const body = JSONbig.parse(response.body);
     if (body?.code === -352) {
-        throw new Error('风控校验失败！请手动配置 Cookie 后重试');
+        cacheIn.clearCookie();
+        throw new Error('The cookie has expired, please try again.');
     }
     const items = (body as BilibiliWebDynamicResponse)?.data?.items;
 
@@ -271,6 +291,7 @@ async function handler(ctx) {
 
             // emoji
             let description = getDes(data) || '';
+            const title = getTitle(data) || description;
             // 换行处理
             description = description.replaceAll('\r\n', '<br>').replaceAll('\n', '<br>');
             if (data.module_dynamic?.desc?.rich_text_nodes?.length && showEmoji) {
@@ -325,7 +346,7 @@ async function handler(ctx) {
             }
             const imgHTMLSource = imgHTML ? `<br>${imgHTML}` : '';
             return {
-                title: getTitle(data) || description,
+                title,
                 description: `${description}${originDescription}<br>${urlText}${getIframe(data, disableEmbed)}${getIframe(origin, disableEmbed)}${imgHTMLSource}`,
                 pubDate: data.module_author?.pub_ts ? parseDate(data.module_author.pub_ts, 'X') : undefined,
                 link,
